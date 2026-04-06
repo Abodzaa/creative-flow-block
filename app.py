@@ -472,6 +472,8 @@ class MotionEffectsProcessor:
         self.pose = None
         self.body_landmarks = None
         self._initialized = False
+        self.frame_counter = 0
+        self.process_every_n_frames = 2
 
     def update_settings(self, new_settings: Dict) -> None:
         with self.lock:
@@ -482,34 +484,40 @@ class MotionEffectsProcessor:
         if self._initialized:
             return
 
-        self.mp_pose = mp.solutions.pose
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,
-            smooth_landmarks=True,
-            enable_segmentation=True,
-            min_detection_confidence=0.4,
-            min_tracking_confidence=0.4,
-        )
+        try:
+            self.mp_pose = mp.solutions.pose
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.pose = self.mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=0,
+                smooth_landmarks=True,
+                enable_segmentation=True,
+                min_detection_confidence=0.4,
+                min_tracking_confidence=0.4,
+            )
 
-        self.body_landmarks = [
-            self.mp_pose.PoseLandmark.LEFT_SHOULDER.value,
-            self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
-            self.mp_pose.PoseLandmark.LEFT_ELBOW.value,
-            self.mp_pose.PoseLandmark.RIGHT_ELBOW.value,
-            self.mp_pose.PoseLandmark.LEFT_WRIST.value,
-            self.mp_pose.PoseLandmark.RIGHT_WRIST.value,
-            self.mp_pose.PoseLandmark.LEFT_HIP.value,
-            self.mp_pose.PoseLandmark.RIGHT_HIP.value,
-            self.mp_pose.PoseLandmark.LEFT_KNEE.value,
-            self.mp_pose.PoseLandmark.RIGHT_KNEE.value,
-            self.mp_pose.PoseLandmark.LEFT_ANKLE.value,
-            self.mp_pose.PoseLandmark.RIGHT_ANKLE.value,
-            self.mp_pose.PoseLandmark.NOSE.value,
-            self.mp_pose.PoseLandmark.LEFT_EAR.value,
-        ]
-        self._initialized = True
+            self.body_landmarks = [
+                self.mp_pose.PoseLandmark.LEFT_SHOULDER.value,
+                self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value,
+                self.mp_pose.PoseLandmark.LEFT_ELBOW.value,
+                self.mp_pose.PoseLandmark.RIGHT_ELBOW.value,
+                self.mp_pose.PoseLandmark.LEFT_WRIST.value,
+                self.mp_pose.PoseLandmark.RIGHT_WRIST.value,
+                self.mp_pose.PoseLandmark.LEFT_HIP.value,
+                self.mp_pose.PoseLandmark.RIGHT_HIP.value,
+                self.mp_pose.PoseLandmark.LEFT_KNEE.value,
+                self.mp_pose.PoseLandmark.RIGHT_KNEE.value,
+                self.mp_pose.PoseLandmark.LEFT_ANKLE.value,
+                self.mp_pose.PoseLandmark.RIGHT_ANKLE.value,
+                self.mp_pose.PoseLandmark.NOSE.value,
+                self.mp_pose.PoseLandmark.LEFT_EAR.value,
+            ]
+        except Exception:
+            # Keep stream alive even if model init fails in cloud environment.
+            self.pose = None
+            self.body_landmarks = []
+        finally:
+            self._initialized = True
 
     def get_runtime_stats(self) -> Dict:
         with self.lock:
@@ -703,115 +711,132 @@ class MotionEffectsProcessor:
         img = cv2.flip(img, 1)
         h, w = img.shape[:2]
 
-        # Initialize MediaPipe on first frame
-        if not self._initialized:
-            self._init_mediapipe()
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
-
         now = time.time()
         dt_fps = now - self.last_frame_time
         if dt_fps > 1e-6:
             self.fps = 1.0 / dt_fps
         self.last_frame_time = now
 
-        speed = 0.0
-        move_dx, move_dy = 0.0, 0.0
-        segmentation_mask = None
+        self.frame_counter += 1
 
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        result = self.pose.process(rgb)
+        try:
+            # Initialize MediaPipe on first frame
+            if not self._initialized:
+                self._init_mediapipe()
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        if result.pose_landmarks:
-            lms = result.pose_landmarks.landmark
+            # If model is unavailable, keep raw stream alive.
+            if self.pose is None:
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-            if result.segmentation_mask is not None:
-                segmentation_mask = result.segmentation_mask
+            # Reduce CPU load in cloud by processing every Nth frame.
+            if self.frame_counter % self.process_every_n_frames != 0:
+                self.update_and_draw_particles(img)
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-            # Body center using left and right hips
-            left_hip = lms[self.mp_pose.PoseLandmark.LEFT_HIP.value]
-            right_hip = lms[self.mp_pose.PoseLandmark.RIGHT_HIP.value]
+            speed = 0.0
+            move_dx, move_dy = 0.0, 0.0
+            segmentation_mask = None
 
-            if left_hip.visibility > 0.35 and right_hip.visibility > 0.35:
-                cx = int(((left_hip.x + right_hip.x) * 0.5) * w)
-                cy = int(((left_hip.y + right_hip.y) * 0.5) * h)
-                center = (cx, cy)
+            # Process on a smaller image for faster inference.
+            proc_w = max(320, int(w * 0.6))
+            proc_h = max(240, int(h * 0.6))
+            proc_img = cv2.resize(img, (proc_w, proc_h),
+                                  interpolation=cv2.INTER_LINEAR)
+            rgb = cv2.cvtColor(proc_img, cv2.COLOR_BGR2RGB)
+            result = self.pose.process(rgb)
 
-                if self.prev_center is not None and self.prev_time is not None:
-                    dt = now - self.prev_time
-                    if dt > 1e-4:
-                        move_dx = cx - self.prev_center[0]
-                        move_dy = cy - self.prev_center[1]
-                        dist = float(np.hypot(move_dx, move_dy))
-                        speed = dist / dt
+            if result.pose_landmarks:
+                lms = result.pose_landmarks.landmark
 
-                        with self.lock:
-                            threshold = float(self.settings["speed_threshold"])
-                            sound_enabled = bool(
-                                self.settings["sound_enabled"])
+                if result.segmentation_mask is not None:
+                    segmentation_mask = result.segmentation_mask
 
-                        # FAST: stars from full body + no portrait darkening
-                        if speed > threshold:
-                            self.spawn_star_particles_from_body(
-                                lms, w, h, move_dx, move_dy, speed)
-                            if not self.high_speed_active:
-                                self.high_speed_active = True
-                                if sound_enabled:
-                                    self.sound_event_count += 1
-                        else:
-                            self.high_speed_active = False
+                # Body center using left and right hips
+                left_hip = lms[self.mp_pose.PoseLandmark.LEFT_HIP.value]
+                right_hip = lms[self.mp_pose.PoseLandmark.RIGHT_HIP.value]
 
-                self.prev_center = center
-                self.prev_time = now
+                if left_hip.visibility > 0.35 and right_hip.visibility > 0.35:
+                    cx = int(((left_hip.x + right_hip.x) * 0.5) * w)
+                    cy = int(((left_hip.y + right_hip.y) * 0.5) * h)
+                    center = (cx, cy)
 
-                cv2.circle(img, center, 5, (0, 255, 255), -
-                           1, lineType=cv2.LINE_AA)
+                    if self.prev_center is not None and self.prev_time is not None:
+                        dt = now - self.prev_time
+                        if dt > 1e-4:
+                            move_dx = cx - self.prev_center[0]
+                            move_dy = cy - self.prev_center[1]
+                            dist = float(np.hypot(move_dx, move_dy))
+                            speed = dist / dt
+
+                            with self.lock:
+                                threshold = float(
+                                    self.settings["speed_threshold"])
+                                sound_enabled = bool(
+                                    self.settings["sound_enabled"])
+
+                            # FAST: stars from full body + no portrait darkening
+                            if speed > threshold:
+                                self.spawn_star_particles_from_body(
+                                    lms, w, h, move_dx, move_dy, speed)
+                                if not self.high_speed_active:
+                                    self.high_speed_active = True
+                                    if sound_enabled:
+                                        self.sound_event_count += 1
+                            else:
+                                self.high_speed_active = False
+
+                    self.prev_center = center
+                    self.prev_time = now
+
+                    cv2.circle(img, center, 5, (0, 255, 255), -
+                               1, lineType=cv2.LINE_AA)
+                else:
+                    self.prev_center = None
+                    self.prev_time = None
+
+                with self.lock:
+                    draw_pose = bool(self.settings["draw_pose"])
+
+                if draw_pose:
+                    self.mp_drawing.draw_landmarks(
+                        img,
+                        result.pose_landmarks,
+                        self.mp_pose.POSE_CONNECTIONS,
+                        landmark_drawing_spec=self.mp_drawing.DrawingSpec(
+                            color=(80, 220, 255), thickness=2, circle_radius=2),
+                        connection_drawing_spec=self.mp_drawing.DrawingSpec(
+                            color=(255, 180, 80), thickness=2),
+                    )
             else:
                 self.prev_center = None
                 self.prev_time = None
+                self.high_speed_active = False
 
             with self.lock:
-                draw_pose = bool(self.settings["draw_pose"])
+                threshold = float(self.settings["speed_threshold"])
+                fade_step = float(self.settings["fade_step"])
 
-            if draw_pose:
-                self.mp_drawing.draw_landmarks(
-                    img,
-                    result.pose_landmarks,
-                    self.mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=self.mp_drawing.DrawingSpec(
-                        color=(80, 220, 255), thickness=2, circle_radius=2),
-                    connection_drawing_spec=self.mp_drawing.DrawingSpec(
-                        color=(255, 180, 80), thickness=2),
-                )
-        else:
+            self.speed = speed
+
+            if speed > threshold:
+                self.portrait_fade = max(0.0, self.portrait_fade - fade_step)
+            else:
+                self.portrait_fade = min(1.0, self.portrait_fade + fade_step)
+
+            if self.portrait_fade > 0.01:
+                img = self.apply_portrait_effect(
+                    img, segmentation_mask, self.portrait_fade)
+
+            self.update_and_draw_particles(img)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+        except Exception:
+            # Never break the stream loop because of a processing exception.
             self.prev_center = None
             self.prev_time = None
             self.high_speed_active = False
-
-        with self.lock:
-            threshold = float(self.settings["speed_threshold"])
-            fade_step = float(self.settings["fade_step"])
-
-        self.speed = speed
-
-        # ================================================
-        # Correct speed-based logic
-        # ================================================
-        # FAST  (speed > threshold): bright natural view + stars
-        # SLOW  (speed <= threshold): portrait dark background
-        if speed > threshold:
-            self.portrait_fade = max(0.0, self.portrait_fade - fade_step)
-        else:
-            self.portrait_fade = min(1.0, self.portrait_fade + fade_step)
-
-        if self.portrait_fade > 0.01:
-            img = self.apply_portrait_effect(
-                img, segmentation_mask, self.portrait_fade)
-
-        self.update_and_draw_particles(img)
-
-        # Removed on-frame HUD text for cleaner gallery presentation
-
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+            self.speed = 0.0
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
 # ============================
@@ -879,7 +904,15 @@ with camera_center:
         key="stars-trail-portrait",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=rtc_configuration,
-        media_stream_constraints={"video": True, "audio": False},
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 360},
+                "frameRate": {"ideal": 15, "max": 24},
+                "facingMode": "user",
+            },
+            "audio": False,
+        },
         video_processor_factory=MotionEffectsProcessor,
         async_processing=True,
     )
@@ -981,9 +1014,15 @@ def render_stats_and_sound_once() -> None:
         render_beep_once()
 
 
-# NOTE: On Streamlit Cloud, high-frequency reruns can interrupt WebRTC sessions.
-# Keep HUD rendering in the main run to prioritize a stable camera stream.
-render_stats_and_sound_once()
+# Keep HUD refresh low-frequency to avoid interrupting WebRTC on cloud.
+if hasattr(st, "fragment"):
+    @st.fragment(run_every="1s")
+    def live_fragment():
+        render_stats_and_sound_once()
+
+    live_fragment()
+else:
+    render_stats_and_sound_once()
 
 st.markdown(
     '<div class="video-hint">Allow camera access to begin the installation. Move fast for Creative Flow, and slow down for Creative Block.</div>',
