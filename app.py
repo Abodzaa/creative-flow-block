@@ -475,6 +475,7 @@ class MotionEffectsProcessor:
         self.frame_counter = 0
         self.process_every_n_frames = 2
         self.prev_gray = None
+        self.fallback_points = []
 
     def update_settings(self, new_settings: Dict) -> None:
         with self.lock:
@@ -728,12 +729,14 @@ class MotionEffectsProcessor:
             stars_max = int(self.settings["stars_max"])
 
         total_stars = random.randint(max(4, stars_min // 2), max(8, stars_max))
-        cx, cy = frame_w // 2, frame_h // 2
         spread = int(np.clip(speed * 0.8, 30, 180))
+        base_points = self.fallback_points if self.fallback_points else [
+            (frame_w // 2, frame_h // 2)]
 
         for _ in range(total_stars):
-            px = cx + random.randint(-spread, spread)
-            py = cy + random.randint(-spread, spread)
+            bx, by = random.choice(base_points)
+            px = bx + random.randint(-spread, spread)
+            py = by + random.randint(-spread, spread)
             vx = random.uniform(-2.2, 2.2)
             vy = random.uniform(-2.2, 2.2)
             life = random.randint(16, 34)
@@ -774,9 +777,22 @@ class MotionEffectsProcessor:
         gray = cv2.GaussianBlur(gray, (7, 7), 0)
         if self.prev_gray is None:
             self.prev_gray = gray
+            self.fallback_points = []
             return 0.0
         diff = cv2.absdiff(gray, self.prev_gray)
         self.prev_gray = gray
+        _, thresh = cv2.threshold(diff, 18, 255, cv2.THRESH_BINARY)
+        thresh = cv2.morphologyEx(
+            thresh, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+        ys, xs = np.where(thresh > 0)
+        if len(xs) > 0:
+            sample_count = min(180, len(xs))
+            idx = np.linspace(0, len(xs) - 1, sample_count, dtype=int)
+            self.fallback_points = [(int(xs[i]), int(ys[i])) for i in idx]
+        else:
+            self.fallback_points = []
+
         return float(np.mean(diff)) * 8.0
 
     # ======================================================
@@ -1162,8 +1178,15 @@ def render_stats_and_sound_once() -> None:
         render_beep_once()
 
 
-# Render HUD once per app run to keep the page stable on Streamlit Cloud.
-render_stats_and_sound_once()
+# Refresh the HUD at a low cadence so status stays in sync with the camera.
+if hasattr(st, "fragment"):
+    @st.fragment(run_every="700ms")
+    def live_fragment():
+        render_stats_and_sound_once()
+
+    live_fragment()
+else:
+    render_stats_and_sound_once()
 
 st.markdown(
     '<div class="video-hint">Allow camera access to begin the installation. Move fast for Creative Flow, and slow down for Creative Block.</div>',
