@@ -981,14 +981,9 @@ def render_stats_and_sound_once() -> None:
         render_beep_once()
 
 
-if hasattr(st, "fragment"):
-    @st.fragment(run_every="250ms")
-    def live_fragment():
-        render_stats_and_sound_once()
-
-    live_fragment()
-else:
-    render_stats_and_sound_once()
+# NOTE: On Streamlit Cloud, high-frequency reruns can interrupt WebRTC sessions.
+# Keep HUD rendering in the main run to prioritize a stable camera stream.
+render_stats_and_sound_once()
 
 st.markdown(
     '<div class="video-hint">Allow camera access to begin the installation. Move fast for Creative Flow, and slow down for Creative Block.</div>',
