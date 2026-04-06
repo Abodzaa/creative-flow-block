@@ -1002,7 +1002,7 @@ st.markdown(
     """
     <div class="credits-wrap">
         <div class="credits-text">
-            Student Name:    Mohamed Soliman &nbsp;•&nbsp; Student ID: 244861<br>
+            Hanin Mohamed Soliman &nbsp;•&nbsp; Student ID: 244861<br>
             Supervised by: Dr. Asmaa Mohamed<br>
             Assisting Staff: T.A. Rawan Hamada - T.A. Jana Khaled
         </div>
