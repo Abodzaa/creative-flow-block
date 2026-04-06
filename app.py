@@ -474,6 +474,7 @@ class MotionEffectsProcessor:
         self._initialized = False
         self.frame_counter = 0
         self.process_every_n_frames = 2
+        self.prev_gray = None
 
     def update_settings(self, new_settings: Dict) -> None:
         with self.lock:
@@ -668,6 +669,64 @@ class MotionEffectsProcessor:
 
         self.particles = alive
 
+    def spawn_star_particles_generic(self, frame_w: int, frame_h: int, speed: float) -> None:
+        """Fallback stars when body landmarks are unavailable."""
+        with self.lock:
+            stars_min = int(self.settings["stars_min"])
+            stars_max = int(self.settings["stars_max"])
+
+        total_stars = random.randint(max(4, stars_min // 2), max(8, stars_max))
+        cx, cy = frame_w // 2, frame_h // 2
+        spread = int(np.clip(speed * 0.8, 30, 180))
+
+        for _ in range(total_stars):
+            px = cx + random.randint(-spread, spread)
+            py = cy + random.randint(-spread, spread)
+            vx = random.uniform(-2.2, 2.2)
+            vy = random.uniform(-2.2, 2.2)
+            life = random.randint(16, 34)
+            size = random.randint(6, 14)
+
+            b = random.randint(170, 245)
+            g = random.randint(225, 255)
+            r = random.randint(235, 255)
+
+            self.particles.append(
+                {
+                    "x": px,
+                    "y": py,
+                    "vx": vx,
+                    "vy": vy,
+                    "life": life,
+                    "max_life": life,
+                    "size": size,
+                    "color": (b, g, r),
+                    "angle": random.uniform(0, 360),
+                    "spin": random.uniform(-8.0, 8.0),
+                    "twinkle": random.uniform(0.0, np.pi * 2.0),
+                }
+            )
+
+    def apply_global_darkening(self, frame: np.ndarray, fade: float) -> np.ndarray:
+        if fade < 0.01:
+            return frame
+        with self.lock:
+            darkness = float(self.settings["portrait_darkness"])
+        frame_float = frame.astype(np.float32)
+        dark_frame = cv2.multiply(frame_float, darkness)
+        out = frame_float * (1.0 - fade) + dark_frame * fade
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    def _fallback_motion_speed(self, frame: np.ndarray) -> float:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (7, 7), 0)
+        if self.prev_gray is None:
+            self.prev_gray = gray
+            return 0.0
+        diff = cv2.absdiff(gray, self.prev_gray)
+        self.prev_gray = gray
+        return float(np.mean(diff)) * 8.0
+
     # ======================================================
     # Portrait dark-background effect
     # ======================================================
@@ -727,6 +786,28 @@ class MotionEffectsProcessor:
 
             # If model is unavailable, keep raw stream alive.
             if self.pose is None:
+                speed = self._fallback_motion_speed(img)
+                with self.lock:
+                    threshold = float(self.settings["speed_threshold"])
+                    fade_step = float(self.settings["fade_step"])
+                    sound_enabled = bool(self.settings["sound_enabled"])
+
+                self.speed = speed
+                if speed > threshold * 0.75:
+                    self.spawn_star_particles_generic(w, h, speed)
+                    self.portrait_fade = max(
+                        0.0, self.portrait_fade - fade_step)
+                    if not self.high_speed_active:
+                        self.high_speed_active = True
+                        if sound_enabled:
+                            self.sound_event_count += 1
+                else:
+                    self.high_speed_active = False
+                    self.portrait_fade = min(
+                        1.0, self.portrait_fade + fade_step)
+
+                img = self.apply_global_darkening(img, self.portrait_fade)
+                self.update_and_draw_particles(img)
                 return av.VideoFrame.from_ndarray(img, format="bgr24")
 
             # Reduce CPU load in cloud by processing every Nth frame.
@@ -812,6 +893,18 @@ class MotionEffectsProcessor:
                 self.prev_center = None
                 self.prev_time = None
                 self.high_speed_active = False
+                speed = self._fallback_motion_speed(img)
+                if speed > 0:
+                    with self.lock:
+                        threshold = float(self.settings["speed_threshold"])
+                        fade_step = float(self.settings["fade_step"])
+                    if speed > threshold * 0.75:
+                        self.spawn_star_particles_generic(w, h, speed)
+                        self.portrait_fade = max(
+                            0.0, self.portrait_fade - fade_step)
+                    else:
+                        self.portrait_fade = min(
+                            1.0, self.portrait_fade + fade_step)
 
             with self.lock:
                 threshold = float(self.settings["speed_threshold"])
@@ -825,8 +918,11 @@ class MotionEffectsProcessor:
                 self.portrait_fade = min(1.0, self.portrait_fade + fade_step)
 
             if self.portrait_fade > 0.01:
-                img = self.apply_portrait_effect(
-                    img, segmentation_mask, self.portrait_fade)
+                if segmentation_mask is not None:
+                    img = self.apply_portrait_effect(
+                        img, segmentation_mask, self.portrait_fade)
+                else:
+                    img = self.apply_global_darkening(img, self.portrait_fade)
 
             self.update_and_draw_particles(img)
             return av.VideoFrame.from_ndarray(img, format="bgr24")
