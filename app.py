@@ -1136,41 +1136,9 @@ def render_beep_once() -> None:
 
 def render_stats_and_sound_once() -> None:
     if not webrtc_ctx.video_processor:
-        hud_placeholder.info(
-            "Click Start and allow camera access in your browser.")
         return
 
     stats = webrtc_ctx.video_processor.get_runtime_stats()
-
-    with hud_placeholder.container():
-        mode_text = "CREATIVE FLOW" if stats["mode"] == "FAST" else "CREATIVE BLOCK"
-        mode_color = "#00f5ff" if stats["mode"] == "FAST" else "#e88bff"
-        mode_glow = "0 0 16px rgba(0,245,255,.6), 0 0 36px rgba(0,245,255,.25)" if stats[
-            "mode"] == "FAST" else "0 0 16px rgba(232,139,255,.6), 0 0 36px rgba(232,139,255,.25)"
-
-        st.markdown(
-            f'''<div style="text-align:center; margin: 0.28rem 0 0.45rem 0;">
-                <span style="font-size: clamp(1.5rem, 2.6vw, 2.2rem); font-weight: 800; letter-spacing: 0.18em; color: {mode_color}; text-shadow: {mode_glow};">{mode_text}</span>
-            </div>''',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(f'''
-        <div class="stats-grid">
-            <div class="stats-card" style="border: 1px solid rgba(56,217,255,.25);">
-                <div style="font-size: .67rem; letter-spacing: .11em; text-transform: uppercase; color: #8aa0c8; font-weight:700;">⏱ FPS</div>
-                <div style="margin-top:.28rem; font-size:1rem; font-weight:700; color:#dbf7ff;">{stats['fps']:.1f}</div>
-            </div>
-            <div class="stats-card" style="border: 1px solid rgba(167,139,250,.25);">
-                <div style="font-size: .67rem; letter-spacing: .11em; text-transform: uppercase; color: #9aa3d8; font-weight:700;">🛰 Speed</div>
-                <div style="margin-top:.28rem; font-size:1rem; font-weight:700; color:#efe9ff;">{stats['speed']:.1f} px/s</div>
-            </div>
-            <div class="stats-card" style="border: 1px solid rgba(255,107,214,.24);">
-                <div style="font-size: .67rem; letter-spacing: .11em; text-transform: uppercase; color: #bca4df; font-weight:700;">✦ Mode</div>
-                <div style="margin-top:.28rem; font-size:1rem; font-weight:700; color:#ffffff;">{stats['mode']}</div>
-            </div>
-        </div>
-        ''', unsafe_allow_html=True)
 
     # Play sound on each transition to FAST
     if sound_enabled and stats["sound_event_count"] > st.session_state.last_sound_event:
@@ -1187,11 +1155,6 @@ if hasattr(st, "fragment"):
     live_fragment()
 else:
     render_stats_and_sound_once()
-
-st.markdown(
-    '<div class="video-hint">Allow camera access to begin the installation. Move fast for Creative Flow, and slow down for Creative Block.</div>',
-    unsafe_allow_html=True,
-)
 
 st.markdown(
     """
