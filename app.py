@@ -1054,13 +1054,6 @@ rtc_configuration = {
     ],
 }
 
-st.markdown('<div class="section-label">Live Camera</div>',
-            unsafe_allow_html=True)
-st.markdown(
-    '<div class="glass-card">Centered live view with neon framing and real-time status.</div>',
-    unsafe_allow_html=True,
-)
-
 camera_left, camera_center, camera_right = st.columns([1.35, 2.3, 1.35])
 with camera_center:
     st.markdown('<div class="camera-stage"></div>', unsafe_allow_html=True)
